@@ -2432,6 +2432,31 @@ impl ContainerService for LocalContainerService {
         workspace: &Workspace,
     ) -> Result<ContainerRef, ContainerError> {
         self.touch(workspace).await?;
+
+        // No-worktree kinds (orchestrator, recurrent) are repo-independent: they run
+        // from a fixed, on-demand ~/.vibe-kanban/... folder (never a git worktree), so
+        // an empty repo set is expected for them — same as in `create`. Resolving repo
+        // inputs here would fail them with "Workspace has no repositories configured",
+        // and every repo-derived step below (worktree creation, config files) either
+        // does not apply or would try to lay a worktree over the fixed folder.
+        if let Some(kind) = workspace.kind.filter(|k| k.is_no_worktree()) {
+            let dir = match &workspace.container_ref {
+                Some(container_ref) => PathBuf::from(container_ref),
+                None => Self::fixed_dir_for_kind(workspace, kind),
+            };
+            tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+                ContainerError::Other(anyhow!(
+                    "Failed to create {kind:?} directory {}: {e}",
+                    dir.display()
+                ))
+            })?;
+            let container_ref = dir.to_string_lossy().to_string();
+            if workspace.container_ref.is_none() {
+                Workspace::update_container_ref(&self.db.pool, workspace.id, &container_ref).await?;
+            }
+            return Ok(container_ref);
+        }
+
         let (repositories, workspace_inputs) = self.workspace_repo_inputs(workspace.id).await?;
 
         let workspace_dir = if let Some(container_ref) = &workspace.container_ref {
