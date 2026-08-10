@@ -2440,6 +2440,12 @@ impl ContainerService for LocalContainerService {
         // and every repo-derived step below (worktree creation, config files) either
         // does not apply or would try to lay a worktree over the fixed folder.
         if let Some(kind) = workspace.kind.filter(|k| k.is_no_worktree()) {
+            // Prefer the persisted container_ref over re-deriving the fixed dir.
+            // `create` derives it once; "ensure exists" must not silently relocate
+            // a workspace that already has one. Re-deriving would do exactly that
+            // for Recurrent, whose fixed dir is a function of `workspace.name` --
+            // renaming a routine would strand its existing directory. Operators
+            // may also symlink these folders, which re-deriving would ignore.
             let dir = match &workspace.container_ref {
                 Some(container_ref) => PathBuf::from(container_ref),
                 None => Self::fixed_dir_for_kind(workspace, kind),
