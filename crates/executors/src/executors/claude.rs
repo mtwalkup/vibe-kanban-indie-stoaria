@@ -2652,6 +2652,14 @@ pub fn is_transcript_only_record_type(record_type: &str) -> bool {
             | "agent-name"
             | "summary"
             | "queue-operation"
+            // Emitted repeatedly *after* a turn ends, so leaving these off the
+            // list does more than add noise: each one renders an
+            // "Unrecognized JSON message" entry that lands after the
+            // `TurnComplete` marker, which is how the headed UI decides a turn
+            // is still running. The spinner then never settles.
+            | "bridge-session"
+            | "agent-setting"
+            | "pr-link"
     )
 }
 
@@ -3307,10 +3315,32 @@ mod tests {
             "file-history-snapshot",
             "ai-title",
             "last-prompt",
+            "bridge-session",
+            "agent-setting",
+            "pr-link",
         ] {
             assert!(
                 is_transcript_only_record_type(t),
                 "{t} should be treated as transcript-only"
+            );
+        }
+
+        // Regression: a headed turn ends with `turn_duration` -> TurnComplete,
+        // but bookkeeping records keep arriving afterwards. The UI treats the
+        // turn as idle only while TurnComplete is the last entry, so these must
+        // normalize to nothing at all.
+        for tail_line in [
+            r#"{"type":"bridge-session","sessionId":"11111111-1111-1111-1111-111111111111","bridgeSessionId":"cse_x","lastSequenceNum":0}"#,
+            r#"{"type":"agent-setting","agentSetting":"some:agent","sessionId":"11111111-1111-1111-1111-111111111111"}"#,
+            r#"{"type":"pr-link","sessionId":"11111111-1111-1111-1111-111111111111","prNumber":61,"prUrl":"https://example.invalid/pull/61","prRepository":"o/r"}"#,
+        ] {
+            let tail_json: ClaudeJson = serde_json::from_str(tail_line).unwrap();
+            let mut pt = ClaudeLogProcessor::new();
+            let tail_patches =
+                pt.normalize_entries(&tail_json, "/repo", &EntryIndexProvider::test_new());
+            assert!(
+                patches_to_entries(&tail_patches).is_empty(),
+                "post-turn bookkeeping must not emit an entry after TurnComplete: {tail_line}"
             );
         }
         assert!(!is_transcript_only_record_type("assistant"));
