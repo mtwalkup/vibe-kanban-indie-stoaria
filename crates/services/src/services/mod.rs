@@ -13,6 +13,7 @@ pub mod notification;
 pub mod opencode_agents;
 pub mod orchestrator_compactor;
 pub mod pipeline_stage;
+pub mod pr_link;
 pub mod pipelines;
 pub mod pr_monitor;
 pub mod project_config;

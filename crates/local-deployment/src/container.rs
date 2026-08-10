@@ -53,6 +53,7 @@ use services::services::{
     file::FileService,
     notification::NotificationService,
     pipeline_stage::spawn_pipeline_stage_tracker,
+    pr_link::spawn_pr_link_tracker,
     queued_message::QueuedMessageService,
 };
 use tokio::{
@@ -2069,7 +2070,13 @@ impl LocalContainerService {
             // idempotency guard (keyed by execution_process_id) makes this
             // safe even if `start_execution` already spawned one.
             if process.run_reason == ExecutionProcessRunReason::CodingAgent {
-                spawn_pipeline_stage_tracker(store, ctx.workspace.id, exec_id, self.db.clone());
+                spawn_pipeline_stage_tracker(
+                    store.clone(),
+                    ctx.workspace.id,
+                    exec_id,
+                    self.db.clone(),
+                );
+                spawn_pr_link_tracker(store, ctx.workspace.id, exec_id, self.db.clone());
             }
 
             // OpenCode-headed sessions have no Claude transcript JSONL to tail;
