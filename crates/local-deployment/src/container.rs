@@ -42,7 +42,7 @@ use executors::{
     interactive::{self, InteractiveTmuxConfig},
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
 };
-use futures::{FutureExt, TryStreamExt, stream::select};
+use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
 use git::GitService;
 use services::services::{
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
@@ -2006,15 +2006,51 @@ impl LocalContainerService {
                 _ => return,
             };
 
-            // Fresh empty MsgStore: the normal persister appends only NEW lines
-            // (history is empty), so already-persisted lines are not duplicated.
+            // Seed the store with the already-persisted conversation, in its
+            // normalized form. `stream_normalized_logs` replays the log file
+            // whenever there is no in-memory store, so this must read it
+            // *before* inserting one.
+            //
+            // Only JsonPatch messages are seeded, never raw Stdout/Stderr: the
+            // persister spawned below subscribes to `history_plus_stream()` and
+            // writes exactly those two kinds, so seeding raw lines would
+            // duplicate every one of them on disk. Patches are inert to it.
+            // `EntryIndexProvider::start_from` then numbers live entries after
+            // the seeded ones instead of colliding with them.
+            //
+            // An empty store here is not merely cosmetic: a re-adopted agent
+            // that is idle emits nothing further, so the UI would show an empty
+            // conversation, which it cannot distinguish from a turn still in
+            // progress -- leaving the composer stuck on "Agent is working…"
+            // with no way to send or stop.
+            let seeded: Vec<LogMsg> = match self.stream_normalized_logs(&exec_id).await {
+                Some(stream) => {
+                    stream
+                        .filter_map(|msg| async move {
+                            match msg {
+                                Ok(m @ LogMsg::JsonPatch(_)) => Some(m),
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                        .await
+                }
+                None => Vec::new(),
+            };
+            tracing::debug!(
+                "Re-adoption seeded {} historical patches for execution {}",
+                seeded.len(),
+                exec_id
+            );
+
+            let store = Arc::new(MsgStore::new());
+            for msg in seeded {
+                store.push(msg);
+            }
             self.msg_stores
                 .write()
                 .await
-                .insert(exec_id, Arc::new(MsgStore::new()));
-            let Some(store) = self.msg_stores.read().await.get(&exec_id).cloned() else {
-                return;
-            };
+                .insert(exec_id, store.clone());
 
             if let Some(executor) = ExecutorConfigs::get_cached().get_coding_agent(&profile_id) {
                 let _ = executor.normalize_logs(store.clone(), &effective_dir);
