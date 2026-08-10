@@ -145,6 +145,12 @@ export default defineConfig({
     open: process.env.VITE_OPEN === 'true',
     allowedHosts: [
       '.trycloudflare.com', // allow all cloudflared tunnels
+      // Named tunnels / reverse proxies serve the dev server under their own
+      // hostname, which Vite rejects by default. Opt extra hosts in explicitly:
+      // VITE_ALLOWED_HOSTS=vk.example.com,vk2.example.com
+      ...(process.env.VITE_ALLOWED_HOSTS?.split(',')
+        .map((h) => h.trim())
+        .filter(Boolean) ?? []),
     ],
   },
   optimizeDeps: {
