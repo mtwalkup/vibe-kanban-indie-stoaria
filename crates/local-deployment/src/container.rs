@@ -42,7 +42,7 @@ use executors::{
     interactive::{self, InteractiveTmuxConfig},
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
 };
-use futures::{FutureExt, TryStreamExt, stream::select};
+use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
 use git::GitService;
 use services::services::{
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
@@ -53,6 +53,7 @@ use services::services::{
     file::FileService,
     notification::NotificationService,
     pipeline_stage::spawn_pipeline_stage_tracker,
+    pr_link::spawn_pr_link_tracker,
     queued_message::QueuedMessageService,
 };
 use tokio::{
@@ -2006,15 +2007,51 @@ impl LocalContainerService {
                 _ => return,
             };
 
-            // Fresh empty MsgStore: the normal persister appends only NEW lines
-            // (history is empty), so already-persisted lines are not duplicated.
+            // Seed the store with the already-persisted conversation, in its
+            // normalized form. `stream_normalized_logs` replays the log file
+            // whenever there is no in-memory store, so this must read it
+            // *before* inserting one.
+            //
+            // Only JsonPatch messages are seeded, never raw Stdout/Stderr: the
+            // persister spawned below subscribes to `history_plus_stream()` and
+            // writes exactly those two kinds, so seeding raw lines would
+            // duplicate every one of them on disk. Patches are inert to it.
+            // `EntryIndexProvider::start_from` then numbers live entries after
+            // the seeded ones instead of colliding with them.
+            //
+            // An empty store here is not merely cosmetic: a re-adopted agent
+            // that is idle emits nothing further, so the UI would show an empty
+            // conversation, which it cannot distinguish from a turn still in
+            // progress -- leaving the composer stuck on "Agent is working…"
+            // with no way to send or stop.
+            let seeded: Vec<LogMsg> = match self.stream_normalized_logs(&exec_id).await {
+                Some(stream) => {
+                    stream
+                        .filter_map(|msg| async move {
+                            match msg {
+                                Ok(m @ LogMsg::JsonPatch(_)) => Some(m),
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                        .await
+                }
+                None => Vec::new(),
+            };
+            tracing::debug!(
+                "Re-adoption seeded {} historical patches for execution {}",
+                seeded.len(),
+                exec_id
+            );
+
+            let store = Arc::new(MsgStore::new());
+            for msg in seeded {
+                store.push(msg);
+            }
             self.msg_stores
                 .write()
                 .await
-                .insert(exec_id, Arc::new(MsgStore::new()));
-            let Some(store) = self.msg_stores.read().await.get(&exec_id).cloned() else {
-                return;
-            };
+                .insert(exec_id, store.clone());
 
             if let Some(executor) = ExecutorConfigs::get_cached().get_coding_agent(&profile_id) {
                 let _ = executor.normalize_logs(store.clone(), &effective_dir);
@@ -2033,7 +2070,13 @@ impl LocalContainerService {
             // idempotency guard (keyed by execution_process_id) makes this
             // safe even if `start_execution` already spawned one.
             if process.run_reason == ExecutionProcessRunReason::CodingAgent {
-                spawn_pipeline_stage_tracker(store, ctx.workspace.id, exec_id, self.db.clone());
+                spawn_pipeline_stage_tracker(
+                    store.clone(),
+                    ctx.workspace.id,
+                    exec_id,
+                    self.db.clone(),
+                );
+                spawn_pr_link_tracker(store, ctx.workspace.id, exec_id, self.db.clone());
             }
 
             // OpenCode-headed sessions have no Claude transcript JSONL to tail;
@@ -2432,6 +2475,37 @@ impl ContainerService for LocalContainerService {
         workspace: &Workspace,
     ) -> Result<ContainerRef, ContainerError> {
         self.touch(workspace).await?;
+
+        // No-worktree kinds (orchestrator, recurrent) are repo-independent: they run
+        // from a fixed, on-demand ~/.vibe-kanban/... folder (never a git worktree), so
+        // an empty repo set is expected for them — same as in `create`. Resolving repo
+        // inputs here would fail them with "Workspace has no repositories configured",
+        // and every repo-derived step below (worktree creation, config files) either
+        // does not apply or would try to lay a worktree over the fixed folder.
+        if let Some(kind) = workspace.kind.filter(|k| k.is_no_worktree()) {
+            // Prefer the persisted container_ref over re-deriving the fixed dir.
+            // `create` derives it once; "ensure exists" must not silently relocate
+            // a workspace that already has one. Re-deriving would do exactly that
+            // for Recurrent, whose fixed dir is a function of `workspace.name` --
+            // renaming a routine would strand its existing directory. Operators
+            // may also symlink these folders, which re-deriving would ignore.
+            let dir = match &workspace.container_ref {
+                Some(container_ref) => PathBuf::from(container_ref),
+                None => Self::fixed_dir_for_kind(workspace, kind),
+            };
+            tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+                ContainerError::Other(anyhow!(
+                    "Failed to create {kind:?} directory {}: {e}",
+                    dir.display()
+                ))
+            })?;
+            let container_ref = dir.to_string_lossy().to_string();
+            if workspace.container_ref.is_none() {
+                Workspace::update_container_ref(&self.db.pool, workspace.id, &container_ref).await?;
+            }
+            return Ok(container_ref);
+        }
+
         let (repositories, workspace_inputs) = self.workspace_repo_inputs(workspace.id).await?;
 
         let workspace_dir = if let Some(container_ref) = &workspace.container_ref {

@@ -145,6 +145,21 @@ export default defineConfig({
     open: process.env.VITE_OPEN === 'true',
     allowedHosts: [
       '.trycloudflare.com', // allow all cloudflared tunnels
+      // Named tunnels / reverse proxies serve the dev server under their own
+      // hostname, which Vite rejects by default. Opt extra hosts in explicitly:
+      // VITE_ALLOWED_HOSTS=vk.example.com,vk2.example.com
+      //
+      // Vite matches Host header *names*, so normalise the forms people actually
+      // paste -- a full URL, or host:port -- down to the bare hostname.
+      ...(process.env.VITE_ALLOWED_HOSTS?.split(',')
+        .map((h) =>
+          h
+            .trim()
+            .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '') // scheme
+            .replace(/\/.*$/, '') // path
+            .replace(/:\d+$/, '') // port
+        )
+        .filter(Boolean) ?? []),
     ],
   },
   optimizeDeps: {

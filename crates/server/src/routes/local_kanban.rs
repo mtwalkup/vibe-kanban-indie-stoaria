@@ -14,8 +14,8 @@ use api_types::{
     CreateIssueCommentRequest, CreateIssueRequest, CreateIssueTagRequest, CreateProjectRequest,
     CreateProjectStatusRequest, CreateTagRequest, DeleteResponse, IssueComment, IssuePriority,
     ListIssueCommentsQuery, ListIssueCommentsResponse, MutationResponse, Project as ApiProject,
-    UpdateIssueRequest, UpdateProjectRequest, UpdateProjectStatusRequest, UpdateTagRequest,
-    Workspace as ApiWorkspace,
+    PullRequest as ApiPullRequest, PullRequestIssue as ApiPullRequestIssue, UpdateIssueRequest,
+    UpdateProjectRequest, UpdateProjectStatusRequest, UpdateTagRequest, Workspace as ApiWorkspace,
 };
 use axum::{
     Router,
@@ -31,6 +31,7 @@ use db::models::{
     project::{self, NewProject, Project as DbProject, ProjectUpdate},
     project_repo::ProjectRepo,
     project_status::ProjectStatus as DbProjectStatus,
+    pull_request::PullRequest as DbPullRequest,
     repo::Repo as DbRepo,
 };
 use deployment::Deployment;
@@ -41,7 +42,7 @@ use sqlx::SqlitePool;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::{DeploymentImpl, error::ApiError};
+use crate::{DeploymentImpl, error::ApiError, routes::kanban::to_api_pr};
 
 pub(crate) use project::derive_key;
 
@@ -207,6 +208,53 @@ async fn fb_project_workspaces(
     let rows = IssueWorkspace::list_linked_by_project(&deployment.db().pool, q.project_id).await?;
     let mapped: Vec<ApiWorkspace> = rows.into_iter().map(to_api_workspace).collect();
     Ok(ResponseJson(json!({ "workspaces": mapped })))
+}
+
+/// Every PR recorded against a workspace linked to an issue in this project.
+///
+/// Without this the board can never show a PR: the web Kanban reads PRs only
+/// through `PROJECT_PULL_REQUESTS_SHAPE`, whose fallback is this route, so a
+/// missing route left `pullRequests` permanently empty and every card claimed
+/// it had no PR — including the ones `pr_link` had correctly recorded.
+///
+/// Locally a workspace belongs to at most one issue, so the walk over
+/// `issue_workspaces` gives each PR its owning issue directly.
+async fn fb_pull_requests(
+    State(deployment): State<DeploymentImpl>,
+    Query(q): Query<ProjectScope>,
+) -> Result<ResponseJson<Value>, ApiError> {
+    let pool = &deployment.db().pool;
+    let mut mapped: Vec<ApiPullRequest> = Vec::new();
+    for link in IssueWorkspace::list_linked_by_project(pool, q.project_id).await? {
+        for pr in DbPullRequest::find_by_workspace_id(pool, link.workspace_id).await? {
+            mapped.push(to_api_pr(pr, q.project_id, link.issue_id));
+        }
+    }
+    Ok(ResponseJson(json!({ "pull_requests": mapped })))
+}
+
+/// The PR<->issue join the frontend resolves card PR badges through
+/// (`PROJECT_PULL_REQUEST_ISSUES_SHAPE`). There is no `pull_request_issues`
+/// table locally — the link is implied by `pull_requests.workspace_id` ->
+/// `issue_workspaces.issue_id` — so the rows are synthesized. A PR maps to
+/// exactly one issue here, which makes the PR's own id a stable link id.
+async fn fb_pull_request_issues(
+    State(deployment): State<DeploymentImpl>,
+    Query(q): Query<ProjectScope>,
+) -> Result<ResponseJson<Value>, ApiError> {
+    let pool = &deployment.db().pool;
+    let mut mapped: Vec<ApiPullRequestIssue> = Vec::new();
+    for link in IssueWorkspace::list_linked_by_project(pool, q.project_id).await? {
+        for pr in DbPullRequest::find_by_workspace_id(pool, link.workspace_id).await? {
+            let pull_request_id = Uuid::parse_str(&pr.id).unwrap_or_else(|_| Uuid::nil());
+            mapped.push(ApiPullRequestIssue {
+                id: pull_request_id,
+                pull_request_id,
+                issue_id: link.issue_id,
+            });
+        }
+    }
+    Ok(ResponseJson(json!({ "pull_request_issues": mapped })))
 }
 
 /// All linked workspaces (`WORKSPACES_SHAPE`); single-developer fork — no per-user filter.
@@ -1111,6 +1159,11 @@ pub fn router() -> Router<DeploymentImpl> {
             get(fb_project_workspaces),
         )
         .route("/v1/fallback/workspaces", get(fb_workspaces))
+        .route("/v1/fallback/pull_requests", get(fb_pull_requests))
+        .route(
+            "/v1/fallback/pull_request_issues",
+            get(fb_pull_request_issues),
+        )
         .route("/v1/projects", post(create_project))
         .route("/v1/projects/bulk", post(bulk_projects))
         .route(

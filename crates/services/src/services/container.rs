@@ -1805,6 +1805,12 @@ pub trait ContainerService {
             && let Some(store) = self.get_msg_store_by_id(&execution_process.id).await
         {
             crate::services::pipeline_stage::spawn_pipeline_stage_tracker(
+                store.clone(),
+                workspace.id,
+                execution_process.id,
+                self.db().clone(),
+            );
+            crate::services::pr_link::spawn_pr_link_tracker(
                 store,
                 workspace.id,
                 execution_process.id,
