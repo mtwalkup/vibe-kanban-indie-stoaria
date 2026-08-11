@@ -246,8 +246,10 @@ fn pr_status_to_api(s: MergeStatus) -> PullRequestStatus {
     }
 }
 
+/// Shared with `local_kanban`'s `/v1/fallback/pull_requests`, so the MCP view
+/// of a card's PRs and the web board's view are rendered from one mapping.
 #[allow(deprecated)] // `issue_id` is deprecated on the wire type but still required.
-fn to_api_pr(pr: DbPullRequest, project_id: Uuid, issue_id: Uuid) -> ApiPullRequest {
+pub(crate) fn to_api_pr(pr: DbPullRequest, project_id: Uuid, issue_id: Uuid) -> ApiPullRequest {
     ApiPullRequest {
         id: Uuid::parse_str(&pr.id).unwrap_or_else(|_| Uuid::nil()),
         url: pr.pr_url,
