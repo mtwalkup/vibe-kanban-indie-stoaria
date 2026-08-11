@@ -9,6 +9,55 @@ export const PIPELINE_START = '<!-- vk:pipeline:start -->';
 export const PIPELINE_END = '<!-- vk:pipeline:end -->';
 
 /**
+ * True when the delimiter found at `idx` stands ALONE on its line — nothing
+ * before it but the line break, nothing after it but the line break.
+ *
+ * A bare `indexOf` is not enough: stage prompts legitimately *quote* the
+ * delimiters while describing them (WikiLLM's `spec` stage does, inside
+ * backticks). Matching those quotes as real delimiters made every recompose
+ * cut mid-prompt — the strip left the block's tail stranded above the new
+ * block and the extract truncated the new one mid-sentence, compounding on
+ * each edit. Only a standalone line is a delimiter; a mention inside prose
+ * is prose.
+ */
+function isDelimiterLine(text: string, idx: number, marker: string): boolean {
+  const before = text[idx - 1];
+  if (idx !== 0 && before !== '\n') return false;
+  const after = text[idx + marker.length];
+  return after === undefined || after === '\n' || after === '\r';
+}
+
+/** Index of the FIRST standalone `marker` line at or after `from`, else -1. */
+function indexOfDelimiter(text: string, marker: string, from = 0): number {
+  for (
+    let idx = text.indexOf(marker, from);
+    idx !== -1;
+    idx = text.indexOf(marker, idx + marker.length)
+  ) {
+    if (isDelimiterLine(text, idx, marker)) return idx;
+  }
+  return -1;
+}
+
+/**
+ * Index of the LAST standalone `marker` line, else -1. The block opener is
+ * anchored to the last one so a description that quotes the marker on a line
+ * of its own — a spec describing this very format — still resolves to the
+ * generated block rather than to the prose above it.
+ */
+function lastIndexOfDelimiter(text: string, marker: string): number {
+  let found = -1;
+  for (
+    let idx = text.indexOf(marker);
+    idx !== -1;
+    idx = text.indexOf(marker, idx + marker.length)
+  ) {
+    if (isDelimiterLine(text, idx, marker)) found = idx;
+  }
+  return found;
+}
+
+/**
  * Instruction line that leads the stage list. Pipelines are now authored by
  * vibe-kanban (from a pipeline file) and delivered pre-ordered, so the execution
  * agent runs them top-to-bottom rather than choosing which apply.
@@ -164,8 +213,8 @@ export function extractManualLines(
   block: string,
   knownStageFragments: ReadonlySet<string>
 ): string[] {
-  const start = block.indexOf(PIPELINE_START);
-  const endDelim = block.indexOf(PIPELINE_END);
+  const start = lastIndexOfDelimiter(block, PIPELINE_START);
+  const endDelim = indexOfDelimiter(block, PIPELINE_END, start === -1 ? 0 : start);
   const inner =
     start === -1
       ? block
@@ -284,9 +333,9 @@ export function composePipelineBlock(
  * remaining prose with trailing whitespace trimmed.
  */
 export function stripPipelineBlock(description: string): string {
-  const start = description.indexOf(PIPELINE_START);
+  const start = lastIndexOfDelimiter(description, PIPELINE_START);
   if (start === -1) return description;
-  const endIdx = description.indexOf(PIPELINE_END, start);
+  const endIdx = indexOfDelimiter(description, PIPELINE_END, start);
   const after =
     endIdx === -1 ? '' : description.slice(endIdx + PIPELINE_END.length);
   return (description.slice(0, start) + after).replace(/\s+$/, '');
@@ -301,9 +350,9 @@ export function extractPipelineBlock(
   description: string | null | undefined
 ): string {
   if (!description) return '';
-  const start = description.indexOf(PIPELINE_START);
+  const start = lastIndexOfDelimiter(description, PIPELINE_START);
   if (start === -1) return '';
-  const endIdx = description.indexOf(PIPELINE_END, start);
+  const endIdx = indexOfDelimiter(description, PIPELINE_END, start);
   if (endIdx === -1) return description.slice(start);
   return description.slice(start, endIdx + PIPELINE_END.length);
 }
@@ -350,9 +399,9 @@ function shortenStageLabel(text: string): string {
  * past the delimiters).
  */
 function extractPipelineBlockText(description: string): string {
-  const start = description.indexOf(PIPELINE_START);
+  const start = lastIndexOfDelimiter(description, PIPELINE_START);
   if (start !== -1) {
-    const end = description.indexOf(PIPELINE_END, start);
+    const end = indexOfDelimiter(description, PIPELINE_END, start);
     return end === -1
       ? description.slice(start + PIPELINE_START.length)
       : description.slice(start + PIPELINE_START.length, end);

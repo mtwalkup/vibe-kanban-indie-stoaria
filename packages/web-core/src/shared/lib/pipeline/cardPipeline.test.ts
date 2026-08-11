@@ -9,6 +9,7 @@ import {
   extractPipelineBlock,
   orderedEnabledStages,
   parsePipelineStages,
+  stripPipelineBlock,
 } from './cardPipeline';
 
 const pipeline: Pipeline = {
@@ -298,6 +299,41 @@ describe('composePipelineBlock', () => {
     expect(replaced).toContain('1. Write a plan.');
     expect(replaced).not.toContain('Write a spec.');
     expect(replaced.match(/vk:pipeline:start/g)?.length).toBe(1);
+  });
+
+  it('LOCKED: a stage prompt that quotes the delimiters survives a recompose', () => {
+    // WikiLLM's `spec` stage describes this very format, so its prompt
+    // contains both markers inside backticks. Substring-anchored delimiter
+    // scanning treated those quotes as the real block bounds: the strip left
+    // the block's tail stranded above the new block and the extract truncated
+    // the new one mid-sentence, and it compounded on every subsequent edit.
+    const quoting: Pipeline = {
+      ...pipeline,
+      stages: [
+        {
+          ...pipeline.stages[0],
+          prompt_fragment:
+            'Strip the block: take the LAST line whose entire content is ' +
+            `exactly \`${PIPELINE_START}\`, and the first line after it whose ` +
+            `entire content is exactly \`${PIPELINE_END}\`, and delete both.`,
+        },
+      ],
+    };
+    const stageId = quoting.stages[0].id;
+    const block = composePipelineBlock(quoting, [stageId], '', null);
+    const withBlock = appendPipelineToDescription('My card body.', block);
+
+    expect(stripPipelineBlock(withBlock)).toBe('My card body.');
+    expect(extractPipelineBlock(withBlock)).toBe(block);
+    expect(withBlock.endsWith(PIPELINE_END)).toBe(true);
+
+    // Recomposing is idempotent rather than compounding.
+    const again = appendPipelineToDescription(withBlock, block);
+    expect(again).toBe(withBlock);
+    expect(again.match(/vk:pipeline:start/g)?.length).toBe(2); // 1 delimiter + 1 quoted
+    expect(
+      again.split('\n').filter((l) => l === PIPELINE_START)
+    ).toHaveLength(1);
   });
 
   it('also accepts a single pipeline wrapped in an array (back-compat)', () => {
