@@ -25,7 +25,7 @@
     "esbuild": "^0.27.2"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.0",
     "cac": "^7.0.0"
   },
   "files": [
