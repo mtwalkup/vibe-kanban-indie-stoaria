@@ -99,7 +99,7 @@ rand = { version = "0.8", features = ["std"] }
 ratatui = "0.29"
 regex = "1.11.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "stream"] }
-rmcp = { version = "1.2.0", features = ["server", "transport-io"] }
+rmcp = { version = "2.0.0", features = ["server", "transport-io"] }
 rust-embed = "8.2"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 schemars = { version = "1.0.4", features = ["chrono04", "derive", "preserve_order", "uuid1"] }
